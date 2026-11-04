@@ -1,0 +1,54 @@
+name: Zen fork housekeeping
+
+# Disables upstream workflows that can only ever do work in the upstream
+# repository (release, publishing, bot and triage automation). In this fork
+# their jobs are skipped by `github.repository == ...` guards, but scheduled and
+# push/workflow_run triggers still create a skipped run each time. Disabling them
+# here keeps the Actions tab readable without editing upstream files, so
+# `Zen upstream sync` never hits merge conflicts. The disabled state survives
+# syncs; this job re-applies the list daily, after the upstream sync.
+#
+# To re-enable one: remove it from UPSTREAM_ONLY, then Actions > workflow > Enable.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "53 5 * * *" # daily, 30 minutes after Zen upstream sync
+
+permissions:
+  actions: write # enable/disable workflows
+
+concurrency:
+  group: zen-fork-housekeeping
+  cancel-in-progress: false
+
+jobs:
+  disable-upstream-only:
+    name: Disable upstream-only workflows
+    if: github.event.repository.fork
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Disable
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # space-separated workflow file names (see .github/ZEN-WORKFLOWS.md)
+          UPSTREAM_ONLY: >-
+            node-release-cut.yml node-release-pr.yml node-release-labels.yml node-release.yml node-github-release.yml release-progress.yml container-release.yml invoice-desk-scan.yml
+        run: |
+          set -uo pipefail
+          echo "| Workflow | Before | After |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          for wf in $UPSTREAM_ONLY; do
+            if ! state="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$wf" --jq .state 2>/dev/null)"; then
+              echo "::notice::$wf not found (removed or renamed upstream); update UPSTREAM_ONLY"
+              echo "| $wf | missing | - |" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+            after="$state"
+            if [ "$state" = active ]; then
+              gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/$wf/disable" && after=disabled_manually
+              echo "Disabled $wf"
+            fi
+            echo "| $wf | $state | $after |" >> "$GITHUB_STEP_SUMMARY"
+          done
