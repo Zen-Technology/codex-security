@@ -1,0 +1,36 @@
+name: Zen Codex Security self-test
+
+# Exercises zen-codex-security-scan.yml in dry-run mode: checkout, Action
+# download at the pinned commit, Ubuntu sandbox setup and configuration
+# validation. No API key, model calls or cost.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/zen-codex-security-*.yml"
+      - "action.yml"
+      - "github-action/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zen-codex-security-selftest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dry-run-repository:
+    uses: ./.github/workflows/zen-codex-security-scan.yml # zizmor: ignore[self-repository] -- actionlint 1.7.12 predates $/
+    permissions:
+      contents: read
+      pull-requests: read
+      security-events: write
+      actions: read
+    with:
+      scope: repository
+      paths: |
+        examples/invoice-desk
+      dry-run: true
+      upload-sarif: false
+      timeout-minutes: 20

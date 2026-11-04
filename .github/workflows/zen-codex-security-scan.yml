@@ -1,0 +1,175 @@
+name: Zen Codex Security scan
+
+# Reusable Codex Security scan for Zen-Technology repositories.
+#
+# Call it from any repository (see .github/ZEN-WORKFLOWS.md for the full guide):
+#
+#   jobs:
+#     codex-security:
+#       uses: Zen-Technology/codex-security/.github/workflows/zen-codex-security-scan.yml@<commit-sha>
+#       permissions:
+#         contents: read
+#         pull-requests: read
+#         security-events: write
+#         actions: read
+#       with:
+#         fail-on-severity: high
+#       secrets:
+#         CODEX_SECURITY_API_KEY: ${{ secrets.CODEX_SECURITY_API_KEY }}
+#
+# Pull requests get a diff scan of the change, while push, schedule and manual
+# runs scan the whole repository. Completed findings are uploaded to code
+# scanning as SARIF, with a separate category per scope.
+#
+# The Action is pinned to a reviewed commit of this fork. After syncing and
+# reviewing upstream changes, bump ACTION_PIN below (the full 40-character SHA).
+
+on:
+  workflow_call:
+    inputs:
+      scope:
+        description: "repository or diff. Empty: diff for pull_request events, repository otherwise."
+        type: string
+        default: ""
+      paths:
+        description: Newline-delimited repository-relative files or folders (repository scope only).
+        type: string
+        default: ""
+      mode:
+        description: standard or deep (deep is repository scope only).
+        type: string
+        default: standard
+      model:
+        description: Model ID. Empty uses the CLI default for the provider.
+        type: string
+        default: ""
+      effort:
+        description: Reasoning effort passed to Codex.
+        type: string
+        default: high
+      cyber-access-program:
+        description: "Empty (CLI default), standard, daybreak_blue or daybreak_red."
+        type: string
+        default: ""
+      fail-on-severity:
+        description: none, low, medium, high or critical.
+        type: string
+        default: none
+      max-cost:
+        description: Estimated USD stop threshold per scan. Empty means no limit.
+        type: string
+        default: "10"
+      upload-sarif:
+        description: Upload completed findings to GitHub code scanning.
+        type: boolean
+        default: true
+      upload-artifacts:
+        description: Keep the validated reports as a workflow artifact (they contain source excerpts).
+        type: boolean
+        default: false
+      dry-run:
+        description: Validate setup (checkout, sandbox, config) without an API key or model calls.
+        type: boolean
+        default: false
+      timeout-minutes:
+        description: Job timeout.
+        type: number
+        default: 60
+    secrets:
+      CODEX_SECURITY_API_KEY:
+        description: OpenAI API key for the scan. Not needed for dry runs.
+        required: false
+    outputs:
+      scan-status:
+        description: completed, skipped or failed
+        value: ${{ jobs.scan.outputs.scan-status }}
+      critical-count:
+        value: ${{ jobs.scan.outputs.critical-count }}
+      high-count:
+        value: ${{ jobs.scan.outputs.high-count }}
+      estimated-cost:
+        value: ${{ jobs.scan.outputs.estimated-cost }}
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Codex Security (${{ inputs.scope || (github.event_name == 'pull_request' && 'diff' || 'repository') }})
+    # Never hand the API key to code from forks, Dependabot, or drafts.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       github.actor != 'dependabot[bot]' &&
+       github.event.pull_request.draft == false)
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      pull-requests: read
+      security-events: write
+      actions: read
+    outputs:
+      scan-status: ${{ steps.security.outputs.scan-status }}
+      critical-count: ${{ steps.security.outputs.critical-count }}
+      high-count: ${{ steps.security.outputs.high-count }}
+      estimated-cost: ${{ steps.security.outputs.estimated-cost }}
+    steps:
+      - name: Resolve scan settings
+        id: settings
+        env:
+          INPUT_SCOPE: ${{ inputs.scope }}
+          EVENT_NAME: ${{ github.event_name }}
+          DRY_RUN: ${{ inputs.dry-run }}
+          FAIL_ON: ${{ inputs.fail-on-severity }}
+          HAS_KEY: ${{ secrets.CODEX_SECURITY_API_KEY != '' }}
+        run: |
+          scope="$INPUT_SCOPE"
+          if [ -z "$scope" ]; then
+            if [ "$EVENT_NAME" = pull_request ]; then scope="diff"; else scope="repository"; fi
+          fi
+          case "$scope" in repository|diff) ;; *) echo "::error::scope must be repository or diff, got '$scope'"; exit 1 ;; esac
+          if [ "$DRY_RUN" = true ] && [ "$FAIL_ON" != none ]; then
+            echo "::error::dry-run requires fail-on-severity: none"; exit 1
+          fi
+          if [ "$DRY_RUN" != true ] && [ "$HAS_KEY" != true ]; then
+            echo "::error::CODEX_SECURITY_API_KEY is not set. Add it as a repository or organization secret and pass it to this workflow, or set dry-run: true."
+            exit 1
+          fi
+          echo "scope=$scope" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the code to scan
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # PR scans review the head commit; the Action derives the merge base.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Scan
+        id: security
+        # ACTION_PIN: reviewed commit of Zen-Technology/codex-security
+        uses: Zen-Technology/codex-security@24da27dd592f9090c9c31c1fc0e6a244af03d682
+        with:
+          scope: ${{ steps.settings.outputs.scope }}
+          paths: ${{ inputs.paths }}
+          mode: ${{ inputs.mode }}
+          model: ${{ inputs.model }}
+          effort: ${{ inputs.effort }}
+          cyber-access-program: ${{ inputs.cyber-access-program }}
+          fail-on-severity: ${{ inputs.fail-on-severity }}
+          max-cost: ${{ inputs.max-cost }}
+          dry-run: ${{ inputs.dry-run }}
+          upload-artifacts: ${{ inputs.upload-artifacts }}
+          artifact-name: codex-security-${{ steps.settings.outputs.scope }}
+        env:
+          OPENAI_API_KEY: ${{ secrets.CODEX_SECURITY_API_KEY }}
+
+      - name: Upload findings to code scanning
+        if: ${{ always() && inputs.upload-sarif && steps.security.outputs.sarif-upload-ready == 'true' }}
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: ${{ steps.security.outputs.sarif-path }}
+          sha: ${{ steps.security.outputs.scanned-sha }}
+          ref: ${{ steps.security.outputs.analysis-ref }}
+          category: codex-security-${{ steps.settings.outputs.scope }}
